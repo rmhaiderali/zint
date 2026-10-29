@@ -1573,6 +1573,29 @@ static int qr_calc_binlen_segs(const int version, char modes[], const unsigned i
     return count;
 }
 
+static void qr_set_single_mode(char modes[], const unsigned int ddata[], const int length, const int gs1) {
+    int i;
+    char mode = 'N';
+
+    for (i = 0; i < length; i++) {
+        if (!z_isdigit(ddata[i])) {
+            mode = 'A';
+            break;
+        }
+    }
+    if (mode == 'A') {
+        for (i = 0; i < length; i++) {
+            if (!qr_is_alpha(ddata[i], gs1)) {
+                mode = 'B';
+                break;
+            }
+        }
+    }
+    for (i = 0; i < length; i++) {
+        modes[i] = mode;
+    }
+}
+
 /* Helper to process source data into `ddata` array */
 static int qr_prep_data(struct zint_symbol *symbol, struct zint_seg segs[], const int seg_count,
             unsigned int ddata[]) {
@@ -1634,6 +1657,7 @@ INTERNAL int zint_qrcode(struct zint_symbol *symbol, struct zint_seg segs[], con
     const struct zint_structapp *p_structapp = NULL;
     const int gs1 = ((symbol->input_mode & 0x07) == GS1_MODE);
     const int fast_encode = symbol->input_mode & FAST_MODE;
+    const int no_multibyte = (symbol->option_3 & 0xFF) == ZINT_NO_MULTIBYTE;
     const int debug_print = symbol->debug & ZINT_DEBUG_PRINT;
     const int eci_length_segs = zint_get_eci_length_segs(segs, seg_count);
     struct zint_seg *local_segs = (struct zint_seg *) z_alloca(sizeof(struct zint_seg) * seg_count);
@@ -1654,6 +1678,9 @@ INTERNAL int zint_qrcode(struct zint_symbol *symbol, struct zint_seg segs[], con
     warn_number = qr_prep_data(symbol, local_segs, seg_count, ddata);
     if (warn_number >= ZINT_ERROR) {
         return warn_number;
+    }
+    if (no_multibyte) {
+        qr_set_single_mode(modes, ddata, eci_length_segs, gs1);
     }
 
     if (symbol->structapp.count) {
@@ -1704,7 +1731,7 @@ INTERNAL int zint_qrcode(struct zint_symbol *symbol, struct zint_seg segs[], con
         }
     }
 
-    est_binlen = qr_calc_binlen_segs(40, modes, ddata, local_segs, seg_count, p_structapp, 0 /*mode_preset*/, gs1,
+    est_binlen = qr_calc_binlen_segs(40, modes, ddata, local_segs, seg_count, p_structapp, no_multibyte /*mode_preset*/, gs1,
                     debug_print);
 
     if (symbol->option_1 >= 1 && symbol->option_1 <= 4) {
@@ -1736,7 +1763,7 @@ INTERNAL int zint_qrcode(struct zint_symbol *symbol, struct zint_seg segs[], con
            than current lower version one */
         prev_est_binlen = est_binlen;
         est_binlen = qr_calc_binlen_segs(autosize, modes, ddata, local_segs, seg_count, p_structapp,
-                        0 /*mode_preset*/, gs1, debug_print);
+                        no_multibyte /*mode_preset*/, gs1, debug_print);
         if (prev_est_binlen < est_binlen) { /* Shouldn't happen */
             assert(0); /* Not reached (hopefully) */
             /* Defensively use version 40 `modes` to avoid crashes (ticket #300) */
@@ -1756,7 +1783,7 @@ INTERNAL int zint_qrcode(struct zint_symbol *symbol, struct zint_seg segs[], con
             prev_est_binlen = est_binlen;
             memcpy(prev_modes, modes, eci_length_segs);
             est_binlen = qr_calc_binlen_segs(autosize - 1, modes, ddata, local_segs, seg_count, p_structapp,
-                            0 /*mode_preset*/, gs1, debug_print);
+                            no_multibyte /*mode_preset*/, gs1, debug_print);
 
             if (8 * qr_data_codewords[ecc_level][autosize - 2] < est_binlen) {
                 canShrink = 0;
@@ -1783,7 +1810,7 @@ INTERNAL int zint_qrcode(struct zint_symbol *symbol, struct zint_seg segs[], con
         if (symbol->option_2 > version) {
             version = symbol->option_2;
             est_binlen = qr_calc_binlen_segs(symbol->option_2, modes, ddata, local_segs, seg_count, p_structapp,
-                            0 /*mode_preset*/, gs1, debug_print);
+                            no_multibyte /*mode_preset*/, gs1, debug_print);
         }
 
         if (symbol->option_2 < version) {
@@ -2150,6 +2177,7 @@ INTERNAL int zint_microqr(struct zint_symbol *symbol, unsigned char source[], in
     char modes[40];
     int alpha_used = 0, byte_or_kanji_used = 0;
     int eci = 0;
+    int no_multibyte;
     int version_valid[4];
     int binary_count[4];
     int ecc_level, version;
@@ -2185,6 +2213,7 @@ INTERNAL int zint_microqr(struct zint_symbol *symbol, unsigned char source[], in
         ecc_level = symbol->option_1 - 1;
     }
 
+    no_multibyte = (symbol->option_3 & 0xFF) == ZINT_NO_MULTIBYTE;
     /* If ZINT_FULL_MULTIBYTE use Kanji mode in DATA_MODE or for non-Shift JIS in UNICODE_MODE */
     full_multibyte = (symbol->option_3 & 0xFF) == ZINT_FULL_MULTIBYTE;
     user_mask = (symbol->option_3 >> 8) & 0x0F; /* User mask is pattern + 1, so >= 1 and <= 4 */
@@ -2205,6 +2234,10 @@ INTERNAL int zint_microqr(struct zint_symbol *symbol, unsigned char source[], in
             }
             eci = 20;
         }
+    }
+
+    if (no_multibyte) {
+        qr_set_single_mode(modes, ddata, length, 0 /*gs1*/);
     }
 
     /* Determine if alpha (excluding numerics), byte or kanji used */
@@ -2251,7 +2284,7 @@ INTERNAL int zint_microqr(struct zint_symbol *symbol, unsigned char source[], in
     for (i = 0; i < 4; i++) {
         if (version_valid[i]) {
             binary_count[i] = qr_calc_binlen_segs(MICROQR_VERSION + i, modes, ddata, segs, seg_count,
-                                NULL /*p_structapp*/, 0 /*mode_preset*/, 0 /*gs1*/, debug_print);
+                                NULL /*p_structapp*/, no_multibyte /*mode_preset*/, 0 /*gs1*/, debug_print);
         } else {
             binary_count[i] = 128 + 1;
         }
@@ -2310,7 +2343,9 @@ INTERNAL int zint_microqr(struct zint_symbol *symbol, unsigned char source[], in
         }
     }
 
-    qr_define_modes(modes, ddata, length, 0 /*gs1*/, MICROQR_VERSION + version, debug_print);
+    if (!no_multibyte) {
+        qr_define_modes(modes, ddata, length, 0 /*gs1*/, MICROQR_VERSION + version, debug_print);
+    }
 
     bp = qr_binary_segs(ZUCP(full_stream), MICROQR_VERSION + version, 0 /*target_codewords*/, modes, ddata,
                         segs, seg_count, NULL /*p_structapp*/, 0 /*gs1*/, binary_count[version], debug_print);
